@@ -1,0 +1,223 @@
+/**
+ * Articulate Extension UI Styles
+ */
+
+/* Mic button container */
+.articulate-mic-container {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  position: relative;
+  z-index: 999998;
+}
+
+/* Mic button */
+.articulate-mic-button {
+  width: 36px;
+  height: 36px;
+  padding: 6px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background-color: #f0f0f0;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.articulate-mic-button:hover {
+  background-color: #e8e8e8;
+  border-color: #ccc;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
+
+.articulate-mic-button:active {
+  transform: scale(0.95);
+}
+
+.articulate-mic-button.recording {
+  background-color: #ff4444;
+  border-color: #cc0000;
+  animation: pulse 1s infinite;
+}
+
+.articulate-mic-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Pulse animation for recording state */
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 68, 68, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(255, 68, 68, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 68, 68, 0);
+  }
+}
+
+/* Status indicator */
+.articulate-status {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  background-color: #ddd;
+}
+
+.articulate-status.listening {
+  background-color: #ff4444;
+  animation: blink 1s infinite;
+}
+
+.articulate-status.processing {
+  background-color: #ffaa00;
+  animation: blink 0.6s infinite;
+}
+
+@keyframes blink {
+  0%,
+  49%,
+  100% {
+    opacity: 1;
+  }
+  50%,
+  99% {
+    opacity: 0.5;
+  }
+}
+
+/* Notification toast */
+.articulate-notification {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  padding: 12px 16px;
+  background: #44aa44;
+  color: white;
+  border-radius: 4px;
+  font-size: 14px;
+  z-index: 999999;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  animation: slideIn 0.3s ease;
+}
+
+.articulate-notification.articulate-error {
+  background: #ff4444;
+}
+
+.articulate-notification.articulate-success {
+  background: #44aa44;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(400px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* Popup styles */
+.articulate-popup {
+  min-width: 300px;
+  padding: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.articulate-popup h1 {
+  margin: 0 0 16px 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #333;
+}
+
+.articulate-popup label {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 14px;
+  color: #555;
+}
+
+.articulate-popup input[type='checkbox'],
+.articulate-popup input[type='radio'] {
+  margin-right: 8px;
+}
+
+.articulate-popup select {
+  width: 100%;
+  padding: 8px;
+  margin-top: 4px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.articulate-popup button {
+  width: 100%;
+  padding: 10px;
+  margin-top: 12px;
+  background-color: #4a90e2;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.articulate-popup button:hover {
+  background-color: #357abd;
+}
+
+.articulate-popup button:active {
+  transform: scale(0.98);
+}
+
+/* Dark theme support */
+@media (prefers-color-scheme: dark) {
+  .articulate-mic-button {
+    background-color: #333;
+    border-color: #555;
+    color: #fff;
+  }
+
+  .articulate-mic-button:hover {
+    background-color: #444;
+    border-color: #666;
+  }
+
+  .articulate-popup {
+    background-color: #222;
+    color: #fff;
+  }
+
+  .articulate-popup h1 {
+    color: #fff;
+  }
+
+  .articulate-popup label {
+    color: #aaa;
+  }
+
+  .articulate-popup select {
+    background-color: #333;
+    color: #fff;
+    border-color: #555;
+  }
+}

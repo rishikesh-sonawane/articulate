@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "Articulate - Voice to Polished Text",
+  "version": "0.1.0",
+  "description": "Speak naturally into any text field. AI polishes your speech into professional writing.",
+  "permissions": ["activeTab", "storage", "scripting"],
+  "host_permissions": [
+    "https://*.slack.com/*",
+    "https://*.gmail.com/*",
+    "https://*.google.com/*",
+    "https://*.notion.so/*",
+    "https://*.atlassian.net/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "css": ["styles/ui.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["styles/ui.css", "assets/icon.svg"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "icons": {
+    "16": "assets/icon-16.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Articulate Settings"
+  },
+  "commands": {
+    "toggle-voice-input": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+M",
+        "mac": "Command+Shift+M"
+      },
+      "description": "Toggle voice input for active field"
+    }
+  }
+}
