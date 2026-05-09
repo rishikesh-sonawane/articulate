@@ -1,230 +1,505 @@
 /**
  * Content Script for Articulate Extension
- * Injected on every page to provide voice-to-text functionality
+ * Injected on every page to provide voice-to-text functionality.
  */
 
-interface Settings {
-  mode: 'raw' | 'polished';
-  backendUrl: string;
-  theme: 'dark' | 'light';
-  autoPolish?: boolean;
-  showConfirmation?: boolean;
-}
+const DEFAULT_SETTINGS = {
+  mode: 'polished',
+  backendUrl: 'ws://localhost:8080',
+  theme: 'dark',
+  autoPolish: true,
+  showConfirmation: true,
+  transcriptionProvider: 'backend',
+};
 
 class ArticulateController {
-  private settings: Settings;
-  private mediaRecorder: MediaRecorder | null = null;
-  private mediaStream: MediaStream | null = null;
-  private websocket: WebSocket | null = null;
-  private isRecording = false;
-  private currentField: HTMLInputElement | HTMLTextAreaElement | null = null;
-  private audioChunks: Blob[] = [];
-
   constructor() {
-    this.settings = {
-      mode: 'polished',
-      backendUrl: 'ws://localhost:8080',
-      theme: 'dark',
-    };
+    this.settings = { ...DEFAULT_SETTINGS };
+    this.mediaRecorder = null;
+    this.mediaStream = null;
+    this.recognition = null;
+    this.recognitionTranscript = '';
+    this.websocket = null;
+    this.socketOpening = false;
+    this.isRecording = false;
+    this.currentField = null;
+    this.pendingMessages = [];
+    this.fieldSnapshot = null;
+    this.lastFocusedField = null;
+    this.savedSelectionRange = null;
+    this.isFinalizing = false;
+    this.observer = null;
+
     this.init();
   }
 
-  private async init(): Promise<void> {
+  async init() {
     console.log('[Articulate] Initializing content script');
 
-    // Load settings from storage
     this.loadSettings();
-
-    // Inject UI into all text fields
     this.injectUI();
-
-    // Monitor for dynamically added fields
     this.observeDOM();
 
-    // Listen for keyboard shortcut
-    document.addEventListener('keydown', e => this.handleKeydown(e));
+    document.addEventListener('keydown', event => this.handleKeydown(event));
+    document.addEventListener('focusin', event => {
+      if (this.isTextField(event.target)) {
+        this.lastFocusedField = event.target;
+        this.attachMicButton(event.target);
+      }
+    });
   }
 
-  private loadSettings(): void {
+  loadSettings() {
     chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, response => {
-      if (response.success) {
-        this.settings = response.settings;
+      if (response && response.success) {
+        this.settings = { ...DEFAULT_SETTINGS, ...response.settings };
         console.log('[Articulate] Settings loaded:', this.settings);
       }
     });
   }
 
-  private injectUI(): void {
-    // Find all text input fields
-    const inputs = document.querySelectorAll(
-      'input[type="text"], textarea, [contenteditable="true"]'
-    );
+  injectUI() {
+    document.querySelectorAll('[data-articulate="true"]').forEach(container => {
+      const field = container.__articulateField;
 
-    inputs.forEach(field => {
-      if (!field.hasAttribute('data-articulate-injected')) {
-        this.attachMicButton(field as HTMLElement);
+      if (!field || !document.body.contains(field)) {
+        container.remove();
       }
     });
+
+    const candidates = Array.from(
+      document.querySelectorAll(
+        'input:not([type]), input[type="email"], input[type="search"], input[type="text"], input[type="url"], textarea, [contenteditable="true"]'
+      )
+    );
+
+    const fields = candidates.filter(field => this.shouldAttachToField(field));
+    fields.forEach(field => this.attachMicButton(field));
+    this.dedupeMicButtons();
   }
 
-  private attachMicButton(field: HTMLElement): void {
-    // Create mic button container
-    const container = document.createElement('div');
+  attachMicButton(field) {
+    if (!this.isTextField(field) || field.hasAttribute('data-articulate-injected')) {
+      return;
+    }
+
+    const host = this.getButtonHost(field);
+
+    if (!host || this.hasNativeVoiceControl(host)) {
+      return;
+    }
+
+    const container = document.createElement('span');
     container.className = 'articulate-mic-container';
     container.setAttribute('data-articulate', 'true');
+    container.setAttribute('data-articulate-control', 'mic');
+    container.__articulateField = field;
 
     const button = document.createElement('button');
     button.className = 'articulate-mic-button';
     button.type = 'button';
-    button.innerHTML = '🎙️';
+    button.innerHTML = this.getMicIcon();
     button.title = 'Click to speak (Ctrl+Shift+M)';
     button.setAttribute('aria-label', 'Voice input');
 
-    // Handle click
-    button.addEventListener('click', e => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.toggleRecording(field as HTMLInputElement | HTMLTextAreaElement);
+    button.addEventListener('mousedown', event => {
+      this.savedSelectionRange = this.getCurrentSelectionRange();
+      event.preventDefault();
+      event.stopPropagation();
+    });
+
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.toggleRecording(this.resolveTargetField(field));
     });
 
     container.appendChild(button);
 
-    // Insert near the field
-    if (field.parentElement) {
-      field.parentElement.style.position = 'relative';
-      field.parentElement.appendChild(container);
-      field.setAttribute('data-articulate-injected', 'true');
+    const position = window.getComputedStyle(host).position;
+    if (position === 'static') {
+      host.style.position = 'relative';
     }
+
+    host.appendChild(container);
+    field.setAttribute('data-articulate-injected', 'true');
+    this.positionMicButton(field, container);
+    this.dedupeMicButtons();
   }
 
-  private observeDOM(): void {
-    const observer = new MutationObserver(() => {
-      this.injectUI();
+  observeDOM() {
+    this.observer = new MutationObserver(() => {
+      window.requestAnimationFrame(() => this.injectUI());
     });
 
-    observer.observe(document.body, {
+    this.observer.observe(document.body, {
       childList: true,
       subtree: true,
     });
   }
 
-  private handleKeydown(event: KeyboardEvent): void {
-    // Ctrl+Shift+M or Cmd+Shift+M to toggle voice
+  handleKeydown(event) {
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.code === 'KeyM') {
       event.preventDefault();
-      const activeField = document.activeElement as HTMLInputElement | HTMLTextAreaElement;
-      if (activeField && this.isTextField(activeField)) {
+      const activeField = document.activeElement;
+
+      if (this.isTextField(activeField)) {
+        this.savedSelectionRange = this.getCurrentSelectionRange();
         this.toggleRecording(activeField);
       }
     }
   }
 
-  private isTextField(element: any): boolean {
-    return (
-      element instanceof HTMLInputElement ||
-      element instanceof HTMLTextAreaElement ||
-      (element instanceof HTMLElement && element.contentEditable === 'true')
-    );
+  isTextField(element) {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+
+    if (element instanceof HTMLTextAreaElement) {
+      return true;
+    }
+
+    if (element instanceof HTMLInputElement) {
+      const editableTypes = new Set(['', 'email', 'search', 'text', 'url']);
+      return editableTypes.has(element.type);
+    }
+
+    return element.isContentEditable;
   }
 
-  private async toggleRecording(field: HTMLInputElement | HTMLTextAreaElement): Promise<void> {
+  shouldAttachToField(field) {
+    if (!this.isTextField(field) || field.closest('[data-articulate="true"]')) {
+      return false;
+    }
+
+    if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) {
+      return !field.disabled && !field.readOnly && field.offsetParent !== null;
+    }
+
+    const childEditable = field.querySelector('[contenteditable="true"]');
+    const parentEditable = field.parentElement?.closest('[contenteditable="true"]');
+    const rect = field.getBoundingClientRect();
+    const hasRealTextArea = rect.width >= 80 && rect.height >= 28;
+    const host = this.getButtonHost(field);
+
+    return !childEditable && !parentEditable && hasRealTextArea && !this.hasNativeVoiceControl(host);
+  }
+
+  getButtonHost(field) {
+    if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) {
+      return field.parentElement;
+    }
+
+    return this.findStableEditorHost(field);
+  }
+
+  findStableEditorHost(field) {
+    let host = field;
+    let current = field.parentElement;
+
+    while (current && current !== document.body) {
+      const rect = current.getBoundingClientRect();
+      const style = window.getComputedStyle(current);
+      const fieldRect = field.getBoundingClientRect();
+      const isReasonableShell =
+        rect.width >= fieldRect.width &&
+        rect.width <= fieldRect.width + 240 &&
+        rect.height >= fieldRect.height &&
+        rect.height <= Math.max(fieldRect.height + 180, 72) &&
+        style.display !== 'contents';
+
+      if (isReasonableShell) {
+        host = current;
+      }
+
+      current = current.parentElement;
+    }
+
+    return host;
+  }
+
+  hasNativeVoiceControl(host) {
+    if (!host) {
+      return false;
+    }
+
+    const selectors = [
+      'button[aria-label*="mic" i]',
+      'button[aria-label*="microphone" i]',
+      'button[aria-label*="voice" i]',
+      'button[aria-label*="dictat" i]',
+      'button[title*="mic" i]',
+      'button[title*="microphone" i]',
+      'button[title*="voice" i]',
+      'button[title*="dictat" i]',
+      '[role="button"][aria-label*="mic" i]',
+      '[role="button"][aria-label*="microphone" i]',
+      '[role="button"][aria-label*="voice" i]',
+      '[role="button"][aria-label*="dictat" i]',
+    ];
+
+    return selectors.some(selector => {
+      return Array.from(host.querySelectorAll(selector)).some(control => {
+        return !control.closest('[data-articulate="true"]');
+      });
+    });
+  }
+
+  dedupeMicButtons() {
+    const containers = Array.from(document.querySelectorAll('[data-articulate="true"]'));
+    const seenHosts = new WeakSet();
+
+    containers.forEach(container => {
+      if (!container.querySelector('.articulate-mic-button')) {
+        return;
+      }
+
+      const host = container.parentElement;
+
+      if (!host || seenHosts.has(host)) {
+        container.remove();
+        return;
+      }
+
+      seenHosts.add(host);
+    });
+  }
+
+  positionMicButton(field, container) {
+    const host = container.parentElement;
+
+    if (!host) {
+      return;
+    }
+
+    const hostRect = host.getBoundingClientRect();
+    const fieldRect = field.getBoundingClientRect();
+    const size = this.getButtonSize(fieldRect);
+
+    container.style.setProperty('--articulate-button-size', `${size}px`);
+    container.style.top = `${Math.max(6, fieldRect.top - hostRect.top + 6)}px`;
+    container.style.right = `${Math.max(6, hostRect.right - fieldRect.right + 6)}px`;
+  }
+
+  getButtonSize(rect) {
+    const shortestSide = Math.min(rect.width, rect.height || 36);
+    return Math.max(24, Math.min(36, Math.round(shortestSide * 0.42)));
+  }
+
+  getMicIcon() {
+    return `
+      <svg class="articulate-mic-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/>
+        <path d="M5 11a7 7 0 0 0 14 0"/>
+        <path d="M12 18v3"/>
+        <path d="M8 21h8"/>
+      </svg>
+      <span class="articulate-button-label">Voice input</span>
+    `;
+  }
+
+  async toggleRecording(field) {
     if (this.isRecording) {
       this.stopRecording();
-    } else {
-      this.startRecording(field);
+      return;
     }
+
+    await this.startRecording(field);
   }
 
-  private async startRecording(field: HTMLInputElement | HTMLTextAreaElement): Promise<void> {
+  async startRecording(field) {
     try {
       console.log('[Articulate] Starting recording');
 
-      // Request microphone permission
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.currentField = this.resolveTargetField(field);
+      this.fieldSnapshot = this.captureFieldSnapshot(this.currentField);
+      this.pendingMessages = [];
+      this.recognitionTranscript = '';
 
-      // Create media recorder
-      this.mediaRecorder = new MediaRecorder(this.mediaStream, {
-        mimeType: 'audio/webm',
-      });
-
-      this.audioChunks = [];
-      this.currentField = field;
-      this.isRecording = true;
-
-      // Handle data available
-      this.mediaRecorder.ondataavailable = (event: BlobEvent) => {
-        this.audioChunks.push(event.data);
-        this.sendAudioChunk(event.data);
-      };
-
-      // Handle stop
-      this.mediaRecorder.onstop = async () => {
-        await this.finalizeRecording();
-      };
-
-      // Start recording (emit data every 1 second)
-      this.mediaRecorder.start(1000);
-
-      // Update UI to show recording state
-      this.updateRecordingState(true);
-    } catch (error) {
-      console.error('[Articulate] Failed to start recording:', error);
-      this.showError('Microphone access denied');
-    }
-  }
-
-  private stopRecording(): void {
-    if (this.mediaRecorder && this.isRecording) {
-      console.log('[Articulate] Stopping recording');
-      this.isRecording = false;
-      this.mediaRecorder.stop();
-
-      // Stop media stream
-      if (this.mediaStream) {
-        this.mediaStream.getTracks().forEach(track => track.stop());
-        this.mediaStream = null;
+      if (this.settings.transcriptionProvider === 'browser' && this.canUseSpeechRecognition()) {
+        this.startSpeechRecognition(field);
+        return;
       }
 
-      // Signal finalize to backend
-      this.websocket?.send(JSON.stringify({ type: 'finalize' }));
-
-      // Update UI
-      this.updateRecordingState(false);
-    }
-  }
-
-  private sendAudioChunk(chunk: Blob): void {
-    if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
       this.connectWebSocket();
-    }
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-    if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-      this.websocket.send(chunk);
+      const recorderOptions = this.getRecorderOptions();
+      this.mediaRecorder = new MediaRecorder(this.mediaStream, recorderOptions);
+
+      this.mediaRecorder.ondataavailable = event => {
+        if (event.data && event.data.size > 0) {
+          this.sendMessage(event.data);
+        }
+      };
+
+      this.mediaRecorder.onstop = () => {
+        this.sendMessage(JSON.stringify({ type: 'finalize', mode: this.settings.mode }));
+        this.updateRecordingState(false, true);
+      };
+
+      this.mediaRecorder.start(1000);
+      this.isRecording = true;
+      this.updateRecordingState(true, false);
+    } catch (error) {
+      console.error('[Articulate] Failed to start recording:', error);
+      this.cleanupRecording();
+      this.showError('Microphone access denied or unavailable');
     }
   }
 
-  private connectWebSocket(): void {
+  stopRecording() {
+    if (!this.isRecording) {
+      return;
+    }
+
+    console.log('[Articulate] Stopping recording');
+    this.isRecording = false;
+
+    if (this.recognition) {
+      this.isFinalizing = true;
+      this.recognition.stop();
+      this.updateRecordingState(false, true);
+      return;
+    }
+
+    if (!this.mediaRecorder) {
+      this.cleanupRecording();
+      return;
+    }
+
+    if (this.mediaRecorder.state !== 'inactive') {
+      this.mediaRecorder.stop();
+    }
+
+    this.stopMediaStream();
+  }
+
+  canUseSpeechRecognition() {
+    return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+  }
+
+  startSpeechRecognition() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    this.recognition = new SpeechRecognition();
+    this.recognition.continuous = true;
+    this.recognition.interimResults = true;
+    this.recognition.lang = 'en-US';
+
+    let finalTranscript = '';
+
+    this.recognition.onresult = event => {
+      let interimTranscript = '';
+
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const transcript = event.results[index][0].transcript.trim();
+
+        if (event.results[index].isFinal) {
+          finalTranscript = `${finalTranscript} ${transcript}`.trim();
+        } else {
+          interimTranscript = `${interimTranscript} ${transcript}`.trim();
+        }
+      }
+
+      this.recognitionTranscript = `${finalTranscript} ${interimTranscript}`.trim();
+      this.updateFieldWithTranscript(this.recognitionTranscript);
+    };
+
+    this.recognition.onerror = event => {
+      console.error('[Articulate] Speech recognition error:', event.error);
+      this.showError(`Speech recognition failed: ${event.error}`);
+    };
+
+    this.recognition.onend = () => {
+      if (this.isRecording) {
+        try {
+          this.recognition.start();
+        } catch (error) {
+          console.warn('[Articulate] Speech recognition restart failed:', error);
+        }
+        return;
+      }
+
+      this.finalizeRecognizedText(finalTranscript || this.recognitionTranscript);
+    };
+
+    this.recognition.start();
+    this.isRecording = true;
+    this.updateRecordingState(true, false);
+  }
+
+  async finalizeRecognizedText(text) {
+    const transcript = text.trim();
+
+    if (!transcript) {
+      this.cleanupRecording();
+      this.showError('No speech was detected');
+      return;
+    }
+
+    if (this.settings.mode === 'raw') {
+      this.insertFinalText(transcript);
+      return;
+    }
+
     try {
+      const response = await fetch(this.getPolishEndpoint(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: transcript }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Polish request failed with ${response.status}`);
+      }
+
+      const result = await response.json();
+      this.insertFinalText(result.polished || transcript);
+    } catch (error) {
+      console.warn('[Articulate] Polishing failed, inserting raw transcript:', error);
+      this.insertFinalText(transcript);
+    }
+  }
+
+  getPolishEndpoint() {
+    return this.settings.backendUrl
+      .replace(/^wss:\/\//, 'https://')
+      .replace(/^ws:\/\//, 'http://')
+      .replace(/\/$/, '') + '/api/polish';
+  }
+
+  getRecorderOptions() {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+      return { mimeType: 'audio/webm;codecs=opus' };
+    }
+
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm')) {
+      return { mimeType: 'audio/webm' };
+    }
+
+    return {};
+  }
+
+  connectWebSocket() {
+    if (
+      this.websocket &&
+      (this.websocket.readyState === WebSocket.OPEN ||
+        this.websocket.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+
+    try {
+      this.socketOpening = true;
       this.websocket = new WebSocket(this.settings.backendUrl);
 
       this.websocket.onopen = () => {
         console.log('[Articulate] WebSocket connected');
+        this.socketOpening = false;
+        this.flushPendingMessages();
       };
 
-      this.websocket.onmessage = (event: MessageEvent) => {
-        const message = JSON.parse(event.data);
-        console.log('[Articulate] Message received:', message.type);
-
-        if (message.type === 'partial_text') {
-          this.updateFieldWithPartial(message.text);
-        } else if (message.type === 'final_text') {
-          console.log('[Articulate] Final transcript:', message.text);
-        } else if (message.type === 'polished_text') {
-          this.insertFinalText(message.text);
-        } else if (message.type === 'error') {
-          this.showError(message.message || 'An error occurred');
-        }
-      };
+      this.websocket.onmessage = event => this.handleSocketMessage(event);
 
       this.websocket.onerror = error => {
         console.error('[Articulate] WebSocket error:', error);
@@ -233,85 +508,300 @@ class ArticulateController {
 
       this.websocket.onclose = () => {
         console.log('[Articulate] WebSocket closed');
+        this.socketOpening = false;
       };
     } catch (error) {
       console.error('[Articulate] Failed to connect:', error);
+      this.socketOpening = false;
       this.showError('Failed to connect to backend');
     }
   }
 
-  private updateFieldWithPartial(text: string): void {
-    if (this.currentField && this.isRecording) {
-      this.currentField.value = text;
-      this.currentField.dispatchEvent(new Event('input', { bubbles: true }));
+  sendMessage(message) {
+    if (!this.websocket || this.websocket.readyState === WebSocket.CLOSED) {
+      this.connectWebSocket();
+    }
+
+    if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+      this.websocket.send(message);
+      return;
+    }
+
+    this.pendingMessages.push(message);
+  }
+
+  flushPendingMessages() {
+    if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const messages = this.pendingMessages.splice(0);
+    messages.forEach(message => this.websocket.send(message));
+  }
+
+  handleSocketMessage(event) {
+    let message;
+
+    try {
+      message = JSON.parse(event.data);
+    } catch (error) {
+      console.error('[Articulate] Invalid server message:', event.data);
+      return;
+    }
+
+    console.log('[Articulate] Message received:', message.type);
+
+    if (message.type === 'partial_text' && message.text) {
+      this.updateFieldWithTranscript(message.text);
+    } else if (message.type === 'final_text' && this.settings.mode === 'raw') {
+      this.insertFinalText(message.text);
+    } else if (message.type === 'polished_text' && this.settings.mode !== 'raw') {
+      this.insertFinalText(message.text);
+    } else if (message.type === 'error') {
+      this.showError(message.message || 'An error occurred');
     }
   }
 
-  private insertFinalText(text: string): void {
-    if (!this.currentField) return;
+  captureFieldSnapshot(field) {
+    if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) {
+      return {
+        type: 'input',
+        value: field.value,
+        start: field.selectionStart ?? field.value.length,
+        end: field.selectionEnd ?? field.value.length,
+      };
+    }
 
-    this.currentField.value = text;
-    this.currentField.dispatchEvent(new Event('input', { bubbles: true }));
-    this.currentField.dispatchEvent(new Event('change', { bubbles: true }));
-
-    console.log('[Articulate] Text inserted:', text);
-    this.showSuccess('Text polished and inserted');
+    return {
+      type: 'contenteditable',
+      value: field.textContent || '',
+      start: null,
+      end: null,
+    };
   }
 
-  private async finalizeRecording(): Promise<void> {
-    console.log('[Articulate] Finalizing recording');
-    // WebSocket will handle the rest
+  updateFieldWithTranscript(text) {
+    if (!this.currentField || !this.fieldSnapshot || !this.isRecording) {
+      return;
+    }
+
+    if (this.isContentEditableField(this.currentField)) {
+      return;
+    }
+
+    this.writeTextToField(this.currentField, text, false);
   }
 
-  private updateRecordingState(isRecording: boolean): void {
-    const buttons = document.querySelectorAll('.articulate-mic-button');
-    buttons.forEach(btn => {
-      if (isRecording) {
-        btn.classList.add('recording');
-        btn.innerHTML = '⏹️';
-        btn.style.backgroundColor = '#ff4444';
-      } else {
-        btn.classList.remove('recording');
-        btn.innerHTML = '🎙️';
-        btn.style.backgroundColor = '';
+  insertFinalText(text) {
+    const targetField = this.resolveTargetField(this.currentField);
+
+    if (!targetField) {
+      this.cleanupRecording();
+      this.showError('No active text field found');
+      return;
+    }
+
+    const inserted = this.writeTextToField(targetField, text, true);
+    this.cleanupRecording();
+
+    if (inserted) {
+      this.showSuccess('Text inserted');
+    } else {
+      this.showError('Text could not be inserted');
+    }
+  }
+
+  writeTextToField(field, text, isFinal) {
+    const snapshot = this.fieldSnapshot || this.captureFieldSnapshot(field);
+
+    if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) {
+      const before = snapshot.value.slice(0, snapshot.start);
+      const after = snapshot.value.slice(snapshot.end);
+      const separator = before && !before.endsWith(' ') && text ? ' ' : '';
+      const nextValue = `${before}${separator}${text}${after}`;
+      const cursor = before.length + separator.length + text.length;
+
+      field.value = nextValue;
+      field.selectionStart = cursor;
+      field.selectionEnd = cursor;
+    } else {
+      const inserted = this.insertIntoContentEditable(field, text);
+      if (!inserted) {
+        return false;
       }
+    }
+
+    field.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+
+    if (isFinal) {
+      field.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    return true;
+  }
+
+  placeCaretAtEnd(element) {
+    element.focus();
+
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  insertIntoContentEditable(element, text) {
+    element.focus();
+
+    this.restoreSelectionForElement(element);
+
+    const before = element.textContent || '';
+    const commandInserted = document.execCommand('insertText', false, text);
+    const after = element.textContent || '';
+
+    if (!commandInserted || after === before) {
+      const currentText = element.textContent || '';
+      element.textContent = `${currentText}${currentText ? ' ' : ''}${text}`;
+      this.placeCaretAtEnd(element);
+    }
+
+    return (element.textContent || '').includes(text);
+  }
+
+  restoreSelectionForElement(element) {
+    const selection = window.getSelection();
+
+    if (
+      this.savedSelectionRange &&
+      element.contains(this.savedSelectionRange.commonAncestorContainer)
+    ) {
+      selection.removeAllRanges();
+      selection.addRange(this.savedSelectionRange);
+      return;
+    }
+
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  resolveTargetField(preferredField) {
+    const activeField = document.activeElement;
+
+    if (this.isTextField(activeField)) {
+      return activeField;
+    }
+
+    const selectionField = this.getFieldFromSelection();
+    if (selectionField) {
+      return selectionField;
+    }
+
+    if (this.isTextField(this.lastFocusedField)) {
+      return this.lastFocusedField;
+    }
+
+    return preferredField;
+  }
+
+  getFieldFromSelection() {
+    const selection = window.getSelection();
+
+    if (!selection || selection.rangeCount === 0) {
+      return null;
+    }
+
+    const range = selection.getRangeAt(0);
+    const node =
+      range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+        ? range.commonAncestorContainer
+        : range.commonAncestorContainer.parentElement;
+
+    if (!node) {
+      return null;
+    }
+
+    const field = node.closest('[contenteditable="true"], textarea, input');
+    return this.isTextField(field) ? field : null;
+  }
+
+  getCurrentSelectionRange() {
+    const selection = window.getSelection();
+
+    if (!selection || selection.rangeCount === 0) {
+      return null;
+    }
+
+    return selection.getRangeAt(0).cloneRange();
+  }
+
+  isContentEditableField(element) {
+    return element instanceof HTMLElement && element.isContentEditable;
+  }
+
+  updateRecordingState(isRecording, isProcessing) {
+    const buttons = document.querySelectorAll('.articulate-mic-button');
+
+    buttons.forEach(button => {
+      button.classList.toggle('recording', isRecording);
+      button.classList.toggle('processing', isProcessing);
+      button.title = isRecording
+        ? 'Stop recording'
+        : isProcessing
+          ? 'Processing speech'
+          : 'Click to speak (Ctrl+Shift+M)';
+      button.disabled = isProcessing;
     });
   }
 
-  private showError(message: string): void {
+  cleanupRecording() {
+    this.isRecording = false;
+    this.mediaRecorder = null;
+    this.recognition = null;
+    this.recognitionTranscript = '';
+    this.isFinalizing = false;
+    this.stopMediaStream();
+    this.updateRecordingState(false, false);
+  }
+
+  stopMediaStream() {
+    if (this.mediaStream) {
+      this.mediaStream.getTracks().forEach(track => track.stop());
+      this.mediaStream = null;
+    }
+  }
+
+  showError(message) {
+    this.cleanupRecording();
     this.showNotification(message, 'error');
   }
 
-  private showSuccess(message: string): void {
+  showSuccess(message) {
     this.showNotification(message, 'success');
   }
 
-  private showNotification(message: string, type: 'error' | 'success'): void {
+  showNotification(message, type) {
+    const existing = document.querySelector('.articulate-notification');
+    if (existing) {
+      existing.remove();
+    }
+
     const notification = document.createElement('div');
     notification.className = `articulate-notification articulate-${type}`;
     notification.textContent = message;
-    notification.style.cssText = `
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      padding: 12px 16px;
-      background: ${type === 'error' ? '#ff4444' : '#44ff44'};
-      color: white;
-      border-radius: 4px;
-      font-size: 14px;
-      z-index: 999999;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    `;
 
     document.body.appendChild(notification);
 
-    setTimeout(() => {
+    window.setTimeout(() => {
       notification.remove();
     }, 3000);
   }
 }
 
-// Initialize on page load
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
     new ArticulateController();

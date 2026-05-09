@@ -2,6 +2,8 @@
  * Speech-to-Text (ASR) service interface and implementations
  */
 
+import OpenAI, { toFile } from 'openai';
+
 export interface ITranscriber {
   /**
    * Transcribe a single audio chunk
@@ -27,9 +29,19 @@ export interface ITranscriber {
  */
 export class WhisperTranscriber implements ITranscriber {
   private buffer: Buffer[] = [];
+  private client: OpenAI;
   private sessionId: string;
 
-  constructor(private apiKey: string, private model: string = 'small') {
+  constructor(private apiKey: string, private model: string = 'whisper-1') {
+    if (!apiKey) {
+      throw new Error('OPENAI_API_KEY is required when NODE_ENV=production');
+    }
+
+    this.client = new OpenAI({
+      apiKey,
+      timeout: 60 * 1000,
+      maxRetries: 1,
+    });
     this.sessionId = this.generateSessionId();
   }
 
@@ -38,11 +50,7 @@ export class WhisperTranscriber implements ITranscriber {
       // Buffer audio chunks
       this.buffer.push(audioData);
 
-      // TODO: Implement streaming transcription
-      // For now, accumulate chunks and transcribe when finalized
-      // In production, use Whisper API streaming endpoint
-
-      return `[Processing audio chunk... total ${this.buffer.length} chunks]`;
+      return '';
     } catch (error) {
       console.error('Transcription error:', error);
       throw new Error(`Transcription failed: ${error}`);
@@ -55,21 +63,28 @@ export class WhisperTranscriber implements ITranscriber {
         return '';
       }
 
-      // Merge all audio chunks
+      // Merge all audio chunks into one webm file captured by MediaRecorder.
       const totalLength = this.buffer.reduce((sum, buf) => sum + buf.length, 0);
       const mergedAudio = Buffer.concat(this.buffer, totalLength);
 
-      // TODO: Call Whisper API with merged audio
-      // const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-      //   method: 'POST',
-      //   headers: { 'Authorization': `Bearer ${this.apiKey}` },
-      //   body: formData (with merged audio),
-      // });
+      const file = await toFile(mergedAudio, `${this.sessionId}.webm`, {
+        type: 'audio/webm',
+      });
 
-      // Mock response for now
-      const transcript = 'Hello world, team. I think we need to refactor the authentication module.';
+      const transcription = await this.client.audio.transcriptions.create({
+        file,
+        model: this.model,
+        language: 'en',
+        response_format: 'text',
+      });
+
+      const transcript =
+        typeof transcription === 'string'
+          ? transcription
+          : String(transcription);
+
       this.reset();
-      return transcript;
+      return transcript.trim();
     } catch (error) {
       console.error('Finalization error:', error);
       throw new Error(`Transcription finalization failed: ${error}`);

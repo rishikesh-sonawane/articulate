@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Articulate">
+  <circle cx="64" cy="64" r="60" fill="#4a90e2"/>
+  <rect x="52" y="24" width="24" height="50" rx="12" fill="#fff"/>
+  <path d="M38 58a26 26 0 0 0 52 0" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round"/>
+  <path d="M64 84v20M46 104h36" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round"/>
+</svg>

@@ -2,6 +2,8 @@
  * Text Polishing (LLM) service interface and implementations
  */
 
+import OpenAI from 'openai';
+
 export interface IPolisher {
   /**
    * Polish a transcript into well-formed text
@@ -25,6 +27,7 @@ export interface PolishOptions {
  * GPT-based Polisher implementation
  */
 export class GPTPolisher implements IPolisher {
+  private client: OpenAI;
   private systemPrompt = `You are an expert text editor. Your job is to transform raw spoken transcripts into polished, professional writing.
 
 Instructions:
@@ -37,8 +40,18 @@ Instructions:
 
   constructor(
     private apiKey: string,
-    private model: string = 'gpt-3.5-turbo'
-  ) {}
+    private model: string = 'gpt-4o-mini'
+  ) {
+    if (!apiKey) {
+      throw new Error('OPENAI_API_KEY is required when NODE_ENV=production');
+    }
+
+    this.client = new OpenAI({
+      apiKey,
+      timeout: 20 * 1000,
+      maxRetries: 1,
+    });
+  }
 
   async polish(
     transcript: string,
@@ -54,31 +67,20 @@ Instructions:
           ? `\nTone: Write in a ${options.tone} manner.`
           : '';
 
-      const userPrompt = `Polish this transcript into well-formed text:
+      const userPrompt = `Polish this spoken transcript into clear, ready-to-send writing.
+Return only the polished text. Do not wrap it in quotes.
 
 "${transcript}"${toneInstruction}`;
 
-      // TODO: Implement actual OpenAI API call
-      // const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      //   method: 'POST',
-      //   headers: {
-      //     'Authorization': `Bearer ${this.apiKey}`,
-      //     'Content-Type': 'application/json',
-      //   },
-      //   body: JSON.stringify({
-      //     model: this.model,
-      //     messages: [
-      //       { role: 'system', content: this.systemPrompt },
-      //       { role: 'user', content: userPrompt },
-      //     ],
-      //     temperature: 0.7,
-      //     max_tokens: 500,
-      //   }),
-      // });
+      const response = await this.client.responses.create({
+        model: this.model,
+        instructions: this.systemPrompt,
+        input: userPrompt,
+        temperature: 0.3,
+        max_output_tokens: options.maxLength || 500,
+      });
 
-      // Mock response for now
-      const polished = 'Hello, team. I believe we need to refactor the authentication module.';
-      return polished;
+      return response.output_text.trim();
     } catch (error) {
       console.error('Polishing error:', error);
       throw new Error(`Text polishing failed: ${error}`);
@@ -97,11 +99,32 @@ export class MockPolisher implements IPolisher {
     // Simulate processing time
     await new Promise(resolve => setTimeout(resolve, 100));
 
-    // Simple mock: capitalize and add period
-    let polished = transcript.trim();
-    if (polished && !polished.endsWith('.')) {
+    let polished = transcript
+      .trim()
+      .replace(/\s+/g, ' ')
+      .replace(/\b(um|uh|erm|ah|like|basically|actually|you know|i mean)\b[,\s]*/gi, '')
+      .replace(/\b(\w+)(\s+\1\b)+/gi, '$1')
+      .replace(/\bi\b/g, 'I')
+      .replace(/\bim\b/gi, "I'm")
+      .replace(/\bdont\b/gi, "don't")
+      .replace(/\bcant\b/gi, "can't")
+      .replace(/\bwont\b/gi, "won't")
+      .replace(/\blets\b/gi, "let's")
+      .replace(/\s+([,.!?])/g, '$1')
+      .trim();
+
+    polished = this.capitalizeSentences(polished);
+
+    if (polished && !/[.!?]$/.test(polished)) {
       polished += '.';
     }
-    return polished.charAt(0).toUpperCase() + polished.slice(1);
+
+    return polished;
+  }
+
+  private capitalizeSentences(text: string): string {
+    return text.replace(/(^|[.!?]\s+)([a-z])/g, (_match, prefix: string, letter: string) => {
+      return `${prefix}${letter.toUpperCase()}`;
+    });
   }
 }

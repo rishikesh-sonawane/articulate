@@ -4,10 +4,10 @@
  */
 
 import express from 'express';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer, WebSocket, RawData } from 'ws';
 import { createServer } from 'http';
 import dotenv from 'dotenv';
-import { WhisperTranscriber, MockTranscriber } from './services/transcriber';
+import { ITranscriber, WhisperTranscriber, MockTranscriber } from './services/transcriber';
 import { GPTPolisher, MockPolisher } from './services/polisher';
 
 // Load environment variables
@@ -22,15 +22,31 @@ const PORT = process.env.PORT || 8080;
 const USE_MOCK = process.env.NODE_ENV !== 'production';
 
 // Services
-const transcriber = USE_MOCK
-  ? new MockTranscriber()
-  : new WhisperTranscriber(process.env.OPENAI_API_KEY || '', process.env.WHISPER_MODEL);
+const createTranscriber = (): ITranscriber =>
+  USE_MOCK
+    ? new MockTranscriber()
+    : new WhisperTranscriber(
+        process.env.OPENAI_API_KEY || '',
+        process.env.WHISPER_MODEL || 'whisper-1'
+      );
 
 const polisher = USE_MOCK
   ? new MockPolisher()
-  : new GPTPolisher(process.env.OPENAI_API_KEY || '', process.env.OPENAI_MODEL);
+  : new GPTPolisher(process.env.OPENAI_API_KEY || '', process.env.OPENAI_MODEL || 'gpt-3.5-turbo');
 
 // Middleware
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  return next();
+});
+
 app.use(express.json());
 
 // Health check endpoint
@@ -74,15 +90,15 @@ app.post('/api/polish', async (req, res) => {
 // WebSocket connection handler
 wss.on('connection', (ws: WebSocket) => {
   const clientId = `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const transcriber = createTranscriber();
+
   console.log(`[${clientId}] Connected`);
 
-  transcriber.reset();
-
-  ws.on('message', async (data: Buffer | string) => {
+  ws.on('message', async (data, isBinary) => {
     try {
       // Handle text messages (control signals)
-      if (typeof data === 'string') {
-        const message = JSON.parse(data);
+      if (!isBinary) {
+        const message = JSON.parse(data.toString());
 
         if (message.type === 'finalize') {
           console.log(`[${clientId}] Finalizing transcription`);
@@ -123,7 +139,8 @@ wss.on('connection', (ws: WebSocket) => {
       } else {
         // Handle binary audio data
         const startTime = Date.now();
-        const partialTranscript = await transcriber.transcribeChunk(data);
+        const audioBuffer = normalizeWebSocketData(data);
+        const partialTranscript = await transcriber.transcribeChunk(audioBuffer);
         const latency = Date.now() - startTime;
 
         // Send partial transcript to client
@@ -159,6 +176,22 @@ wss.on('connection', (ws: WebSocket) => {
   });
 });
 
+function normalizeWebSocketData(data: RawData): Buffer {
+  if (Buffer.isBuffer(data)) {
+    return data;
+  }
+
+  if (data instanceof ArrayBuffer) {
+    return Buffer.from(data);
+  }
+
+  if (Array.isArray(data)) {
+    return Buffer.concat(data);
+  }
+
+  return Buffer.from(data);
+}
+
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\nShutting down gracefully...');
@@ -189,4 +222,4 @@ server.listen(PORT, () => {
   `);
 });
 
-export { app, wss, transcriber, polisher };
+export { app, wss, createTranscriber, polisher };
