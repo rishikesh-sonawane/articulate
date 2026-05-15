@@ -1,20 +1,9 @@
 /**
- * Text Polishing (LLM) service interface and implementations
+ * Text Polishing (LLM) service - using OpenCode.ai (Anthropic-compatible)
  */
 
-import OpenAI from 'openai';
-
 export interface IPolisher {
-  /**
-   * Polish a transcript into well-formed text
-   * @param transcript Raw transcribed text
-   * @param options Optional polishing options
-   * @returns Promise<string> Polished text
-   */
-  polish(
-    transcript: string,
-    options?: PolishOptions
-  ): Promise<string>;
+  polish(transcript: string, options?: PolishOptions): Promise<string>;
 }
 
 export interface PolishOptions {
@@ -24,107 +13,128 @@ export interface PolishOptions {
 }
 
 /**
- * GPT-based Polisher implementation
+ * OpenCode.ai Polisher (Anthropic-compatible API)
  */
-export class GPTPolisher implements IPolisher {
-  private client: OpenAI;
-  private systemPrompt = `You are an expert text editor. Your job is to transform raw spoken transcripts into polished, professional writing.
+export class OpenCodePolisher implements IPolisher {
+  private apiKey: string;
+  private model: string;
+  private baseUrl = 'https://opencode.ai/zen';
 
-Instructions:
-1. Remove all filler words: "um", "uh", "like", "you know", "basically"
-2. Fix grammar, punctuation, and capitalization
-3. Rephrase awkward sentence structures
-4. Keep the original meaning - do NOT add new information
-5. Keep the response concise and clear
-6. Match the requested tone if specified`;
-
-  constructor(
-    private apiKey: string,
-    private model: string = 'gpt-4o-mini'
-  ) {
-    if (!apiKey) {
-      throw new Error('OPENAI_API_KEY is required when NODE_ENV=production');
-    }
-
-    this.client = new OpenAI({
-      apiKey,
-      timeout: 20 * 1000,
-      maxRetries: 1,
-    });
+  constructor(apiKey: string, model: string = 'minimax-m2.5-free') {
+    this.apiKey = apiKey;
+    this.model = model;
   }
 
-  async polish(
-    transcript: string,
-    options: PolishOptions = {}
-  ): Promise<string> {
-    if (!transcript.trim()) {
+  async polish(transcript: string, options: PolishOptions = {}): Promise<string> {
+    if (!transcript || !transcript.trim()) {
       return '';
     }
 
     try {
-      const toneInstruction =
-        options.tone && options.tone !== 'professional'
-          ? `\nTone: Write in a ${options.tone} manner.`
-          : '';
-
-      const userPrompt = `Polish this spoken transcript into clear, ready-to-send writing.
-Return only the polished text. Do not wrap it in quotes.
-
-"${transcript}"${toneInstruction}`;
-
-      const response = await this.client.responses.create({
-        model: this.model,
-        instructions: this.systemPrompt,
-        input: userPrompt,
-        temperature: 0.3,
-        max_output_tokens: options.maxLength || 500,
+      const response = await fetch(`${this.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: this.model,
+          max_tokens: options.maxLength || 500,
+          messages: [
+            { role: 'user', content: 'You are a professional text editor. Transform raw speech into polished, professional text. Remove filler words (um, uh, like, you know, basically, actually), fix grammar and punctuation, reframe for clarity, and keep the original meaning. Return ONLY the polished text.\n\nInput: ' + transcript.trim() }
+          ],
+        }),
       });
 
-      return response.output_text.trim();
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`API error ${response.status}: ${errorText}`);
+      }
+
+      const data = await response.json() as { content?: Array<{ type?: string; text?: string }> };
+      const textBlock = data.content?.find((block) => block.type === 'text');
+      const polished = textBlock?.text?.trim() || transcript;
+      return this.postProcess(polished);
     } catch (error) {
-      console.error('Polishing error:', error);
-      throw new Error(`Text polishing failed: ${error}`);
+      console.error('[OpenCode] Polishing error:', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
     }
+  }
+
+  private postProcess(text: string): string {
+    let cleaned = text.replace(/^["']|["']$/g, '').trim();
+    if (cleaned && !/[.!?]$/.test(cleaned)) {
+      cleaned += '.';
+    }
+    return cleaned.replace(/\s+/g, ' ');
   }
 }
 
 /**
- * Mock Polisher for testing
+ * Mock Polisher for testing and development
  */
 export class MockPolisher implements IPolisher {
-  async polish(
-    transcript: string,
-    options?: PolishOptions
-  ): Promise<string> {
-    // Simulate processing time
-    await new Promise(resolve => setTimeout(resolve, 100));
+  async polish(transcript: string, _options?: PolishOptions): Promise<string> {
+    // Simulate API latency
+    await this.sleep(100);
 
-    let polished = transcript
-      .trim()
-      .replace(/\s+/g, ' ')
-      .replace(/\b(um|uh|erm|ah|like|basically|actually|you know|i mean)\b[,\s]*/gi, '')
-      .replace(/\b(\w+)(\s+\1\b)+/gi, '$1')
-      .replace(/\bi\b/g, 'I')
-      .replace(/\bim\b/gi, "I'm")
-      .replace(/\bdont\b/gi, "don't")
-      .replace(/\bcant\b/gi, "can't")
-      .replace(/\bwont\b/gi, "won't")
-      .replace(/\blets\b/gi, "let's")
-      .replace(/\s+([,.!?])/g, '$1')
-      .trim();
+    if (!transcript || !transcript.trim()) {
+      return '';
+    }
 
-    polished = this.capitalizeSentences(polished);
+    let polished = transcript.trim();
 
+    // Remove filler words (more comprehensive)
+    const fillers = /\b(um|uh|erm|ah|like|basically|actually|you know|i mean|so yeah|i guess|right|you see|i suppose)\b[,\s]*/gi;
+    polished = polished.replace(fillers, '');
+
+    // Fix repeated consecutive words (like "this is an announcement this is an announcement")
+    polished = polished.replace(/\b(\w+)\s+\1\b/gi, '$1');
+
+    // Fix double phrases (like "this is an announcement this is an announcement")
+    polished = polished.replace(/(.+?)\s+\1/gi, '$1');
+
+    // Fix spacing before punctuation
+    polished = polished.replace(/\s+([,.!?])/g, '$1');
+
+    // Fix multiple spaces
+    polished = polished.replace(/\s{2,}/g, ' ');
+
+    // Capitalize first letter
+    if (polished) {
+      polished = polished.charAt(0).toUpperCase() + polished.slice(1);
+    }
+
+    // Fix capitalization after periods
+    polished = polished.replace(/([.!?])\s+([a-z])/g, (match, punct, letter) => {
+      return punct + ' ' + letter.toUpperCase();
+    });
+
+    // Ensure ends with punctuation
     if (polished && !/[.!?]$/.test(polished)) {
       polished += '.';
     }
 
-    return polished;
+    // Fix common speech-to-text errors
+    polished = polished
+      .replace(/\bIve\b/gi, "I've")
+      .replace(/\bdont\b/gi, "don't")
+      .replace(/\bcant\b/gi, "can't")
+      .replace(/\bwont\b/gi, "won't")
+      .replace(/\bim\b/gi, "I'm")
+      .replace(/\blets\b/gi, "let's")
+      .replace(/\bthats\b/gi, "that's")
+      .replace(/\bwhats\b/gi, "what's")
+      .replace(/\bive\b/gi, "I've")
+      .replace(/\byoure\b/gi, "you're")
+      .replace(/\btheyre\b/gi, "they're")
+      .replace(/\bweve\b/gi, "we've");
+
+    return polished.trim();
   }
 
-  private capitalizeSentences(text: string): string {
-    return text.replace(/(^|[.!?]\s+)([a-z])/g, (_match, prefix: string, letter: string) => {
-      return `${prefix}${letter.toUpperCase()}`;
-    });
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

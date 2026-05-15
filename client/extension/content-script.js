@@ -5,11 +5,13 @@
 
 const DEFAULT_SETTINGS = {
   mode: 'polished',
-  backendUrl: 'ws://localhost:8080',
+  backendUrl: 'http://localhost:8080',
   theme: 'dark',
   autoPolish: true,
   showConfirmation: true,
-  transcriptionProvider: 'backend',
+  transcriptionProvider: 'browser', // Default to browser speech recognition
+  reconnectAttempts: 3,
+  reconnectDelay: 1000,
 };
 
 class ArticulateController {
@@ -29,6 +31,11 @@ class ArticulateController {
     this.savedSelectionRange = null;
     this.isFinalizing = false;
     this.observer = null;
+    this.reconnectAttempt = 0;
+    this.lastError = null;
+    this.audioContext = null;
+    this.analyser = null;
+    this.audioLevelCallback = null;
 
     this.init();
   }
@@ -36,30 +43,50 @@ class ArticulateController {
   async init() {
     console.log('[Articulate] Initializing content script');
 
-    this.loadSettings();
-    this.injectUI();
-    this.observeDOM();
+    try {
+      await this.loadSettings();
+      this.injectUI();
+      this.observeDOM();
+      this.setupEventListeners();
+      console.log('[Articulate] Initialization complete');
+    } catch (error) {
+      console.error('[Articulate] Initialization failed:', error);
+    }
+  }
 
-    document.addEventListener('keydown', event => this.handleKeydown(event));
-    document.addEventListener('focusin', event => {
+  async loadSettings() {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (response) => {
+        if (response && response.success) {
+          this.settings = { ...DEFAULT_SETTINGS, ...response.settings };
+          console.log('[Articulate] Settings loaded:', this.settings);
+        }
+        resolve();
+      });
+    });
+  }
+
+  setupEventListeners() {
+    document.addEventListener('keydown', (event) => this.handleKeydown(event));
+
+    document.addEventListener('focusin', (event) => {
       if (this.isTextField(event.target)) {
         this.lastFocusedField = event.target;
         this.attachMicButton(event.target);
       }
     });
-  }
 
-  loadSettings() {
-    chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, response => {
-      if (response && response.success) {
-        this.settings = { ...DEFAULT_SETTINGS, ...response.settings };
-        console.log('[Articulate] Settings loaded:', this.settings);
+    // Handle visibility change to reconnect WebSocket if needed
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && !this.websocket) {
+        this.connectWebSocket();
       }
     });
   }
 
   injectUI() {
-    document.querySelectorAll('[data-articulate="true"]').forEach(container => {
+    // Clean up existing injected elements
+    document.querySelectorAll('[data-articulate="true"]').forEach((container) => {
       const field = container.__articulateField;
 
       if (!field || !document.body.contains(field)) {
@@ -67,14 +94,22 @@ class ArticulateController {
       }
     });
 
+    // Find and attach to text fields
     const candidates = Array.from(
       document.querySelectorAll(
         'input:not([type]), input[type="email"], input[type="search"], input[type="text"], input[type="url"], textarea, [contenteditable="true"]'
       )
     );
 
-    const fields = candidates.filter(field => this.shouldAttachToField(field));
-    fields.forEach(field => this.attachMicButton(field));
+    console.log('[Articulate] Found', candidates.length, 'candidate fields');
+
+    const fields = candidates.filter((field) => this.shouldAttachToField(field));
+    console.log('[Articulate] Attaching to', fields.length, 'eligible fields');
+
+    fields.forEach((field) => {
+      console.log('[Articulate] Attaching to field:', field.tagName, field.className);
+      this.attachMicButton(field);
+    });
     this.dedupeMicButtons();
   }
 
@@ -101,14 +136,15 @@ class ArticulateController {
     button.innerHTML = this.getMicIcon();
     button.title = 'Click to speak (Ctrl+Shift+M)';
     button.setAttribute('aria-label', 'Voice input');
+    button.setAttribute('aria-pressed', 'false');
 
-    button.addEventListener('mousedown', event => {
+    button.addEventListener('mousedown', (event) => {
       this.savedSelectionRange = this.getCurrentSelectionRange();
       event.preventDefault();
       event.stopPropagation();
     });
 
-    button.addEventListener('click', event => {
+    button.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
       this.toggleRecording(this.resolveTargetField(field));
@@ -128,8 +164,16 @@ class ArticulateController {
   }
 
   observeDOM() {
+    // Debounce DOM observation to avoid excessive calls
+    let debounceTimer = null;
+
     this.observer = new MutationObserver(() => {
-      window.requestAnimationFrame(() => this.injectUI());
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
+      debounceTimer = setTimeout(() => {
+        window.requestAnimationFrame(() => this.injectUI());
+      }, 100);
     });
 
     this.observer.observe(document.body, {
@@ -139,6 +183,7 @@ class ArticulateController {
   }
 
   handleKeydown(event) {
+    // Ctrl+Shift+M or Cmd+Shift+M
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.code === 'KeyM') {
       event.preventDefault();
       const activeField = document.activeElement;
@@ -238,8 +283,8 @@ class ArticulateController {
       '[role="button"][aria-label*="dictat" i]',
     ];
 
-    return selectors.some(selector => {
-      return Array.from(host.querySelectorAll(selector)).some(control => {
+    return selectors.some((selector) => {
+      return Array.from(host.querySelectorAll(selector)).some((control) => {
         return !control.closest('[data-articulate="true"]');
       });
     });
@@ -249,7 +294,7 @@ class ArticulateController {
     const containers = Array.from(document.querySelectorAll('[data-articulate="true"]'));
     const seenHosts = new WeakSet();
 
-    containers.forEach(container => {
+    containers.forEach((container) => {
       if (!container.querySelector('.articulate-mic-button')) {
         return;
       }
@@ -315,19 +360,33 @@ class ArticulateController {
       this.fieldSnapshot = this.captureFieldSnapshot(this.currentField);
       this.pendingMessages = [];
       this.recognitionTranscript = '';
+      this.lastError = null;
 
+      // Use browser speech recognition if configured
       if (this.settings.transcriptionProvider === 'browser' && this.canUseSpeechRecognition()) {
         this.startSpeechRecognition(field);
         return;
       }
 
-      this.connectWebSocket();
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Connect to backend
+      await this.connectWebSocket();
+
+      // Request microphone access
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      // Set up audio analysis for level visualization
+      this.setupAudioAnalyser();
 
       const recorderOptions = this.getRecorderOptions();
       this.mediaRecorder = new MediaRecorder(this.mediaStream, recorderOptions);
 
-      this.mediaRecorder.ondataavailable = event => {
+      this.mediaRecorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
           this.sendMessage(event.data);
         }
@@ -344,8 +403,40 @@ class ArticulateController {
     } catch (error) {
       console.error('[Articulate] Failed to start recording:', error);
       this.cleanupRecording();
-      this.showError('Microphone access denied or unavailable');
+
+      // Provide specific error messages
+      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+        this.showError('Microphone access denied. Please allow microphone access in your browser settings.');
+      } else if (error.name === 'NotFoundError') {
+        this.showError('No microphone found. Please connect a microphone and try again.');
+      } else {
+        this.showError(`Failed to start recording: ${error.message}`);
+      }
     }
+  }
+
+  setupAudioAnalyser() {
+    try {
+      this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+      this.analyser = this.audioContext.createAnalyser();
+      this.analyser.fftSize = 256;
+      source.connect(this.analyser);
+    } catch (error) {
+      console.warn('[Articulate] Audio analyser setup failed:', error);
+    }
+  }
+
+  getAudioLevel() {
+    if (!this.analyser) {
+      return 0;
+    }
+
+    const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+    this.analyser.getByteFrequencyData(dataArray);
+
+    const sum = dataArray.reduce((a, b) => a + b, 0);
+    return sum / dataArray.length / 255;
   }
 
   stopRecording() {
@@ -388,7 +479,7 @@ class ArticulateController {
 
     let finalTranscript = '';
 
-    this.recognition.onresult = event => {
+    this.recognition.onresult = (event) => {
       let interimTranscript = '';
 
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
@@ -405,13 +496,23 @@ class ArticulateController {
       this.updateFieldWithTranscript(this.recognitionTranscript);
     };
 
-    this.recognition.onerror = event => {
+    this.recognition.onerror = (event) => {
       console.error('[Articulate] Speech recognition error:', event.error);
-      this.showError(`Speech recognition failed: ${event.error}`);
+
+      // Handle specific errors
+      const errorMessages = {
+        'no-speech': 'No speech detected. Please try again.',
+        'audio-capture': 'Microphone not available.',
+        'not-allowed': 'Microphone permission denied.',
+        'network': 'Network error in speech recognition.',
+      };
+
+      const message = errorMessages[event.error] || `Speech recognition failed: ${event.error}`;
+      this.showError(message);
     };
 
     this.recognition.onend = () => {
-      if (this.isRecording) {
+      if (this.isRecording && !this.isFinalizing) {
         try {
           this.recognition.start();
         } catch (error) {
@@ -443,7 +544,8 @@ class ArticulateController {
     }
 
     try {
-      const response = await fetch(this.getPolishEndpoint(), {
+      const polishEndpoint = this.getPolishEndpoint();
+      const response = await fetch(polishEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: transcript }),
@@ -462,13 +564,11 @@ class ArticulateController {
   }
 
   getPolishEndpoint() {
-    return this.settings.backendUrl
-      .replace(/^wss:\/\//, 'https://')
-      .replace(/^ws:\/\//, 'http://')
-      .replace(/\/$/, '') + '/api/polish';
+    return this.settings.backendUrl.replace(/\/$/, '') + '/api/polish';
   }
 
   getRecorderOptions() {
+    // Prefer WebM with Opus codec
     if (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
       return { mimeType: 'audio/webm;codecs=opus' };
     }
@@ -477,57 +577,96 @@ class ArticulateController {
       return { mimeType: 'audio/webm' };
     }
 
+    // Fallback to any supported format
     return {};
   }
 
-  connectWebSocket() {
+  async connectWebSocket() {
+    // Check if already connected or connecting
     if (
       this.websocket &&
       (this.websocket.readyState === WebSocket.OPEN ||
         this.websocket.readyState === WebSocket.CONNECTING)
     ) {
-      return;
+      return Promise.resolve();
     }
 
-    try {
-      this.socketOpening = true;
-      this.websocket = new WebSocket(this.settings.backendUrl);
+    return new Promise((resolve, reject) => {
+      try {
+        this.socketOpening = true;
+        this.websocket = new WebSocket(`ws://localhost:8080`);
 
-      this.websocket.onopen = () => {
-        console.log('[Articulate] WebSocket connected');
+        // Set connection timeout
+        const connectionTimeout = setTimeout(() => {
+          if (this.socketOpening) {
+            this.websocket.close();
+            reject(new Error('Connection timeout'));
+          }
+        }, 5000);
+
+        this.websocket.onopen = () => {
+          clearTimeout(connectionTimeout);
+          console.log('[Articulate] WebSocket connected');
+          this.socketOpening = false;
+          this.reconnectAttempt = 0;
+          this.flushPendingMessages();
+          resolve();
+        };
+
+        this.websocket.onmessage = (event) => this.handleSocketMessage(event);
+
+        this.websocket.onerror = (error) => {
+          console.error('[Articulate] WebSocket error:', error);
+          this.lastError = error;
+        };
+
+        this.websocket.onclose = (event) => {
+          console.log('[Articulate] WebSocket closed:', event.code, event.reason);
+          this.socketOpening = false;
+
+          // Attempt reconnection if not intentionally closed
+          if (!event.wasClean && this.reconnectAttempt < this.settings.reconnectAttempts) {
+            this.attemptReconnect();
+          }
+        };
+      } catch (error) {
+        console.error('[Articulate] Failed to connect:', error);
         this.socketOpening = false;
-        this.flushPendingMessages();
-      };
+        reject(error);
+      }
+    });
+  }
 
-      this.websocket.onmessage = event => this.handleSocketMessage(event);
+  attemptReconnect() {
+    this.reconnectAttempt += 1;
+    const delay = this.settings.reconnectDelay * Math.pow(2, this.reconnectAttempt - 1);
 
-      this.websocket.onerror = error => {
-        console.error('[Articulate] WebSocket error:', error);
-        this.showError('Connection failed');
-      };
+    console.log(`[Articulate] Attempting reconnect ${this.reconnectAttempt}/${this.settings.reconnectAttempts} in ${delay}ms`);
 
-      this.websocket.onclose = () => {
-        console.log('[Articulate] WebSocket closed');
-        this.socketOpening = false;
-      };
-    } catch (error) {
-      console.error('[Articulate] Failed to connect:', error);
-      this.socketOpening = false;
-      this.showError('Failed to connect to backend');
-    }
+    setTimeout(() => {
+      this.connectWebSocket().catch((error) => {
+        console.error('[Articulate] Reconnection failed:', error);
+      });
+    }, delay);
   }
 
   sendMessage(message) {
-    if (!this.websocket || this.websocket.readyState === WebSocket.CLOSED) {
-      this.connectWebSocket();
-    }
-
+    // Try to send immediately if connected
     if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
       this.websocket.send(message);
       return;
     }
 
+    // Queue message for later
     this.pendingMessages.push(message);
+
+    // Try to reconnect if not connected
+    if (!this.websocket || this.websocket.readyState === WebSocket.CLOSED) {
+      this.connectWebSocket().catch((error) => {
+        console.error('[Articulate] Failed to send message:', error);
+        this.showError('Failed to connect to backend');
+      });
+    }
   }
 
   flushPendingMessages() {
@@ -536,7 +675,13 @@ class ArticulateController {
     }
 
     const messages = this.pendingMessages.splice(0);
-    messages.forEach(message => this.websocket.send(message));
+    messages.forEach((message) => {
+      try {
+        this.websocket.send(message);
+      } catch (error) {
+        console.error('[Articulate] Failed to send pending message:', error);
+      }
+    });
   }
 
   handleSocketMessage(event) {
@@ -551,14 +696,40 @@ class ArticulateController {
 
     console.log('[Articulate] Message received:', message.type);
 
-    if (message.type === 'partial_text' && message.text) {
-      this.updateFieldWithTranscript(message.text);
-    } else if (message.type === 'final_text' && this.settings.mode === 'raw') {
-      this.insertFinalText(message.text);
-    } else if (message.type === 'polished_text' && this.settings.mode !== 'raw') {
-      this.insertFinalText(message.text);
-    } else if (message.type === 'error') {
-      this.showError(message.message || 'An error occurred');
+    switch (message.type) {
+      case 'partial_text':
+        if (message.text) {
+          this.updateFieldWithTranscript(message.text);
+        }
+        break;
+
+      case 'final_text':
+        if (this.settings.mode === 'raw') {
+          this.insertFinalText(message.text);
+        }
+        break;
+
+      case 'polished_text':
+        if (this.settings.mode !== 'raw') {
+          this.insertFinalText(message.text);
+        }
+        break;
+
+      case 'connected':
+        console.log('[Articulate] Server acknowledged connection:', message.clientId);
+        break;
+
+      case 'error':
+        console.error('[Articulate] Server error:', message);
+        this.showError(message.message || 'Server error occurred');
+        break;
+
+      case 'pong':
+        // Heartbeat response
+        break;
+
+      default:
+        console.log('[Articulate] Unknown message type:', message.type);
     }
   }
 
@@ -585,6 +756,7 @@ class ArticulateController {
       return;
     }
 
+    // Don't update contenteditable during live recording
     if (this.isContentEditableField(this.currentField)) {
       return;
     }
@@ -631,6 +803,7 @@ class ArticulateController {
       }
     }
 
+    // Trigger input events for frameworks that track changes
     field.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
 
     if (isFinal) {
@@ -682,6 +855,7 @@ class ArticulateController {
       return;
     }
 
+    // Fallback: place at end
     const range = document.createRange();
     range.selectNodeContents(element);
     range.collapse(false);
@@ -690,21 +864,24 @@ class ArticulateController {
   }
 
   resolveTargetField(preferredField) {
+    // First priority: active element if it's a text field
     const activeField = document.activeElement;
-
     if (this.isTextField(activeField)) {
       return activeField;
     }
 
+    // Second priority: field from selection
     const selectionField = this.getFieldFromSelection();
     if (selectionField) {
       return selectionField;
     }
 
+    // Third priority: last focused field
     if (this.isTextField(this.lastFocusedField)) {
       return this.lastFocusedField;
     }
 
+    // Fallback: preferred field
     return preferredField;
   }
 
@@ -746,9 +923,10 @@ class ArticulateController {
   updateRecordingState(isRecording, isProcessing) {
     const buttons = document.querySelectorAll('.articulate-mic-button');
 
-    buttons.forEach(button => {
+    buttons.forEach((button) => {
       button.classList.toggle('recording', isRecording);
       button.classList.toggle('processing', isProcessing);
+      button.setAttribute('aria-pressed', isRecording ? 'true' : 'false');
       button.title = isRecording
         ? 'Stop recording'
         : isProcessing
@@ -764,13 +942,24 @@ class ArticulateController {
     this.recognition = null;
     this.recognitionTranscript = '';
     this.isFinalizing = false;
+    this.fieldSnapshot = null;
+
+    // Clean up audio context
+    if (this.audioContext) {
+      this.audioContext.close().catch(() => {});
+      this.audioContext = null;
+    }
+    this.analyser = null;
+
     this.stopMediaStream();
     this.updateRecordingState(false, false);
   }
 
   stopMediaStream() {
     if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach(track => track.stop());
+      this.mediaStream.getTracks().forEach((track) => {
+        track.stop();
+      });
       this.mediaStream = null;
     }
   }
@@ -778,6 +967,9 @@ class ArticulateController {
   showError(message) {
     this.cleanupRecording();
     this.showNotification(message, 'error');
+
+    // Log error for debugging
+    console.error('[Articulate] Error:', message);
   }
 
   showSuccess(message) {
@@ -793,8 +985,13 @@ class ArticulateController {
     const notification = document.createElement('div');
     notification.className = `articulate-notification articulate-${type}`;
     notification.textContent = message;
+    notification.setAttribute('role', 'alert');
+    notification.setAttribute('aria-live', 'polite');
 
     document.body.appendChild(notification);
+
+    // Trigger reflow for animation
+    void notification.offsetWidth;
 
     window.setTimeout(() => {
       notification.remove();
@@ -802,6 +999,7 @@ class ArticulateController {
   }
 }
 
+// Initialize when DOM is ready
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
     new ArticulateController();

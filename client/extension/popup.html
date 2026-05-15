@@ -86,6 +86,11 @@
         cursor: pointer;
       }
 
+      .checkbox-group label {
+        margin: 0;
+        cursor: pointer;
+      }
+
       .button-group {
         display: flex;
         gap: 8px;
@@ -110,6 +115,11 @@
 
       .btn-primary:hover {
         background: #5568d3;
+      }
+
+      .btn-primary:disabled {
+        background: #ccc;
+        cursor: not-allowed;
       }
 
       .btn-secondary {
@@ -145,6 +155,43 @@
         border: 1px solid #f5c6cb;
       }
 
+      .backend-status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        padding: 8px;
+        border-radius: 4px;
+        margin-bottom: 12px;
+      }
+
+      .backend-status.connected {
+        background: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+      }
+
+      .backend-status.disconnected {
+        background: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+      }
+
+      .status-indicator {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+      }
+
+      .status-indicator.connected {
+        background: #28a745;
+      }
+
+      .status-indicator.disconnected {
+        background: #dc3545;
+      }
+
       .footer {
         padding: 12px 16px;
         border-top: 1px solid #eee;
@@ -169,6 +216,12 @@
     </div>
 
     <div class="popup-body">
+      <!-- Backend Status -->
+      <div id="backend-status" class="backend-status">
+        <span class="status-indicator"></span>
+        Checking backend...
+      </div>
+
       <!-- Mode Setting -->
       <div class="setting-group">
         <label for="mode" class="setting-label">Voice Mode</label>
@@ -181,25 +234,35 @@
         >
       </div>
 
+      <!-- Transcription Provider -->
+      <div class="setting-group">
+        <label for="transcriptionProvider" class="setting-label">Transcription Provider</label>
+        <select id="transcriptionProvider">
+          <option value="backend">Backend (Whisper API)</option>
+          <option value="browser">Browser (Speech Recognition)</option>
+        </select>
+        <span class="setting-description"
+          >Backend uses OpenAI Whisper, Browser uses built-in speech recognition</span
+        >
+      </div>
+
       <!-- Backend URL Setting -->
       <div class="setting-group">
-        <label for="backendUrl" class="setting-label">Backend URL</label>
+        <label for="backendUrl" class="setting-label">Backend WebSocket URL</label>
         <input
           type="text"
           id="backendUrl"
           placeholder="ws://localhost:8080"
           value="ws://localhost:8080"
         />
-        <span class="setting-description">WebSocket server address</span>
+        <span class="setting-description">WebSocket server address for audio processing</span>
       </div>
 
       <!-- Auto Polish Setting -->
       <div class="setting-group">
         <div class="checkbox-group">
           <input type="checkbox" id="autoPolish" checked />
-          <label for="autoPolish" class="setting-label" style="margin: 0"
-            >Auto-Polish</label
-          >
+          <label for="autoPolish">Auto-Polish</label>
         </div>
         <span class="setting-description">Automatically polish text after transcription</span>
       </div>
@@ -208,11 +271,9 @@
       <div class="setting-group">
         <div class="checkbox-group">
           <input type="checkbox" id="showConfirmation" checked />
-          <label for="showConfirmation" class="setting-label" style="margin: 0"
-            >Show Confirmation</label
-          >
+          <label for="showConfirmation">Show Confirmation</label>
         </div>
-        <span class="setting-description">Confirm text before inserting into field</span>
+        <span class="setting-description">Show success notification after text insertion</span>
       </div>
 
       <!-- Theme Setting -->
