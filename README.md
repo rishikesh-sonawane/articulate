@@ -1,124 +1,69 @@
-# 🎙️ Articulate — Voice-to-Polished-Text Overlay
+# 🎙️ Articulate — Voice-to-Polished-Text
 
-**Speak faster, write better.** A Chrome extension that automatically converts rambling speech into professional, ready-to-send text across any web application—Slack, Gmail, Jira, and beyond.
+**Speak naturally, get polished text.** A Chrome extension that converts your voice into professional, ready-to-send text across any website—Slack, Gmail, Jira, and more.
 
-![Status](https://img.shields.io/badge/status-MVP%20Development-yellow)
-![Version](https://img.shields.io/badge/version-0.1--alpha-blue)
+![Status](https://img.shields.io/badge/status-Working-green)
+![Version](https://img.shields.io/badge/version-0.1.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
-## 📌 Quick Overview
+## ✨ Features
 
-**Articulate** is a browser extension for software engineers that uses cutting-edge AI to turn spoken words into polished, professional writing. Click a microphone button, speak naturally (even while rambling or using technical jargon), and the system instantly transcribes your speech and cleans it up using AI—removing fillers ("um", "uh"), fixing grammar, and improving tone—then inserts the final text directly into any text field.
-
-**Problem:** Engineers speak ~150 words per minute but only type ~40 WPM. Writing code comments, Slack messages, and Jira tickets takes time.  
-**Solution:** Dictate in 2 minutes what would take 5 minutes to type—and AI polishes it along the way.
-
----
-
-## ✨ Core Features
-
-### MVP (0.1)
-- **🎤 Universal Voice Capture** – Works in any web text field (Slack, Gmail, Google Docs, Jira, Notion).
-- **⚡ Real-Time Transcription** – Uses OpenAI Whisper for near-human accuracy, even with technical terms.
-- **🧠 AI Text Polishing** – GPT-3.5 automatically removes filler words, corrects grammar, and improves tone.
-- **🎛️ Raw vs. Polish Modes** – Choose raw transcription (verbatim) or polished (AI-cleaned).
-- **🔄 Streaming Audio** – Efficient chunk-based streaming for low latency (<1 second).
-- **📍 Seamless Integration** – Text inserts directly into your active field—no copy/paste needed.
-- **🔒 Privacy-First Design** – Optional local processing; never stores your audio.
-
-### Coming Soon (Post-MVP)
-- Multi-language & Hinglish support
-- Custom tone profiles (professional/casual/technical)
-- Context-aware editing (reads surrounding text)
-- Offline mode (local Whisper processing)
-- Desktop app support (native macOS/Windows)
-- Analytics & correction learning
+- **🎤 Voice Input** – Click mic button or press `Ctrl+Shift+M` in any text field
+- **🧠 AI Polishing** – Automatically removes filler words, fixes grammar, improves clarity
+- **🔄 Real-time** – See transcription as you speak
+- **📍 Seamless** – Text inserts directly into your active field
+- **🌐 Works Everywhere** – Any text field on any website
 
 ---
 
-## 🏗️ Architecture
+## 🚀 Quick Start
 
-### Three-Layer System
+### 1. Start the Backend
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                  BROWSER CLIENT (Extension)                  │
-│  • Mic button injection & UI overlay                         │
-│  • Audio capture (getUserMedia)                              │
-│  • WebSocket connection to backend                           │
-│  • Inserts polished text into DOM                            │
-└────────────────────────┬────────────────────────────────────┘
-                         │ WebSocket (binary audio + JSON)
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│              BACKEND SERVICE (Node.js/Python)               │
-│  • WebSocket server for audio streaming                      │
-│  • Orchestrates ASR & LLM calls                              │
-│  • Manages buffering, VAD, retry logic                       │
-│  • Implements backpressure & rate-limiting                   │
-└────────────────────────┬────────────────────────────────────┘
-                    ┌────┴────┐
-                    ▼         ▼
-        ┌──────────────────┐ ┌──────────────────┐
-        │  ASR Engine      │ │  LLM Polisher    │
-        │ (Whisper API)    │ │ (GPT-3.5 Turbo)  │
-        │ or Local         │ │ or Local LLaMA   │
-        └──────────────────┘ └──────────────────┘
+```bash
+cd server
+npm install
+npm run dev
 ```
 
+The server runs on `http://localhost:8080`.
+
+### 2. Load the Extension
+
+1. Open `chrome://extensions/`
+2. Enable **Developer mode** (top-right)
+3. Click **Load unpacked**
+4. Select `client/extension`
+
+### 3. Use It
+
+- Click the 🎙️ mic button on any text field
+- Or press `Ctrl+Shift+M`
+- Speak naturally
+- Stop speaking — AI polishes and inserts the text
+
 ---
 
-## 🚀 Getting Started
+## ⚙️ Configuration
 
-### Prerequisites
+### Environment Variables (server/.env)
 
-- **Node.js** 18+ or **Python** 3.10+
-- **npm** or **yarn** (for frontend)
-- **Chrome** 120+ or Chromium-based browser
-- **OpenAI API Key** (for Whisper & GPT-3.5)
-  - [Get one here](https://platform.openai.com/api-keys)
-  - ~$1–6k/month for MVP scale (~100 daily users)
+```env
+# Required for AI polishing
+MINIMAX_API_KEY=your-opencode-api-key
 
-### Installation (Development)
+# Optional
+MINIMAX_MODEL=minimax-m2.5-free
+PORT=8080
+```
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/yourusername/articulate.git
-   cd articulate
-   ```
+### Get API Key
 
-2. **Setup the backend service:**
-   ```bash
-   cd server
-   npm install
-   ```
-
-3. **Configure environment variables:**
-   ```bash
-   cp .env.example .env
-   # Edit .env and add your OpenAI API key:
-   # OPENAI_API_KEY=sk-...
-   ```
-
-4. **Start the backend:**
-   ```bash
-   npm run dev
-   # Backend should run on ws://localhost:8080
-   ```
-
-5. **Load the extension in Chrome:**
-   - Go to `chrome://extensions/`
-   - Enable **Developer mode** (top-right)
-   - Click **Load unpacked**
-   - Select the `client/extension` directory from this repo
-
-6. **Test it out:**
-   - Open any web page with a text field (try Gmail, Slack, etc.)
-   - Click the 🎙️ icon
-   - Speak naturally
-   - Watch it polish and insert!
+1. Go to [opencode.ai/workspace](https://opencode.ai/workspace/wrk_01KRMWWYQKYA058AACZ3J8T6GQ/keys)
+2. Create a new API key
+3. Add it to `server/.env`
 
 ---
 
@@ -126,160 +71,57 @@
 
 ```
 articulate/
-├── client/
-│   └── extension/
-│       ├── manifest.json              # Extension config (Manifest V3)
-│       ├── background.js              # Service worker
-│       ├── content-script.js           # Audio capture & UI injection
-│       ├── popup.html                  # Settings popup
-│       ├── popup.js                    # Settings logic
-│       └── styles/
-│           └── ui.css                  # Extension UI styles
+├── client/extension/          # Chrome extension
+│   ├── manifest.json          # Extension config (Manifest V3)
+│   ├── background.js           # Service worker
+│   ├── content-script.js      # Audio capture & UI
+│   ├── popup.html/js           # Settings popup
+│   └── styles/ui.css           # UI styles
 │
-├── server/
+├── server/                    # Backend service
 │   ├── src/
-│   │   ├── services/
-│   │   │   ├── transcriber.ts         # ASR (Whisper) interface
-│   │   │   └── polisher.ts             # LLM (GPT) interface
-│   │   └── server.ts                   # WebSocket + REST API
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── .env.example
+│   │   ├── server.ts           # Express + WebSocket server
+│   │   └── services/
+│   │       ├── polisher.ts      # AI text polishing
+│   │       └── transcriber.ts   # Speech-to-text
+│   └── .env                    # Configuration
 │
-├── tests/                              # Test suites
-├── docs/                               # Documentation
-├── Dockerfile
-├── docker-compose.yml
-├── .gitignore
-└── README.md                           # This file
+├── CLAUDE.md                  # Developer notes
+└── README.md                  # This file
 ```
 
 ---
 
-## 🔌 API Reference
+## 🔌 API
 
-### WebSocket Protocol
-
-**Endpoint:** `ws://localhost:8080`
-
-#### Client → Server
-- **Audio chunks** (binary)
-- **Control messages** (JSON): `{"type": "finalize"}`
-
-#### Server → Client
-```json
-{"type": "partial_text", "text": "Hello wor..."}
-{"type": "final_text", "text": "Hello world"}
-{"type": "polished_text", "text": "Hello, world."}
-{"type": "error", "error": "quota_exceeded"}
-```
-
-### REST API
-
-**POST `/api/polish`** – Manually polish text
-```bash
-curl -X POST http://localhost:8080/api/polish \
-  -H "Content-Type: application/json" \
-  -d '{"text": "uh hello team"}'
-```
-
-**GET `/health`** – Health check
-```bash
-curl http://localhost:8080/health
-```
-
----
-
-## 🧪 Testing
+### REST Endpoints
 
 ```bash
-# Unit tests
-npm run test:unit
+# Health check
+GET http://localhost:8080/health
 
-# Integration tests
-npm run test:integration
-
-# End-to-end tests
-npm run test:e2e
-
-# Load testing
-npm run test:load -- --users 100
+# Polish text
+POST http://localhost:8080/api/polish
+Content-Type: application/json
+{"text": "um hello team i wanted to share some news"}
 ```
 
----
-
-## 📊 Metrics & Monitoring
-
-**Key Performance Indicators:**
-- **Latency:** End-to-end <1000ms (target)
-- **Accuracy:** Word Error Rate <5%
-- **Availability:** 99.9% uptime
-- **Error Rate:** <1%
-
-**Prometheus metrics** available on `:9090/metrics`
-
----
-
-## 🔒 Privacy & Security
-
-✅ **Audio never stored** – Deleted after transcription  
-✅ **No user tracking** – Extension doesn't send PII  
-✅ **Encrypted in transit** – TLS/wss  
-✅ **Optional local mode** – Coming soon  
-✅ **GDPR/CCPA compliant**
-
-See [Privacy Policy](docs/PRIVACY.md) and [Security Policy](docs/SECURITY.md).
-
----
-
-## 📈 Roadmap
-
-### Phase 1: MVP (May–June 2026)
-- [x] Extension UI & audio capture
-- [x] Backend WebSocket server
-- [x] Whisper ASR integration
-- [x] GPT-3.5 polishing
-- [ ] Beta launch (invite-only)
-
-### Phase 2: Polish & Launch (July 2026)
-- [ ] Performance optimization
-- [ ] Chrome store listing
-- [ ] Public launch 🚀
-
-### Phase 3: Expansion (Aug–Oct 2026)
-- [ ] Multi-language support
-- [ ] Local processing mode
-- [ ] Custom tone profiles
-- [ ] Desktop app (Electron)
-
----
-
-## 🤝 Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+### WebSocket (optional)
 
 ```bash
-git checkout -b feat/awesome-feature
-# Make changes
-git commit -m "feat: add awesome feature"
-git push origin feat/awesome-feature
-# Create Pull Request
+ws://localhost:8080
 ```
 
 ---
 
-## 📄 License
+## 📝 Example
 
-MIT © 2026 Articulate Contributors. See [LICENSE](LICENSE).
+**You say:** "so um like i was thinking we should like work on this project and um i think we should like finish it by friday"
 
----
-
-## 💬 Support
-
-- **Issues:** [GitHub Issues](https://github.com/yourusername/articulate/issues)
-- **Email:** support@articulate.dev
-- **Twitter:** [@ArticulateApp](https://twitter.com/ArticulateApp)
+**AI polishes to:** "I was thinking we should work on this project, and I think we should finish it by Friday."
 
 ---
 
-**Made with ❤️ to help engineers write faster.**
+## License
+
+MIT
